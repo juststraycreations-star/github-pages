@@ -1,22 +1,3 @@
-Got it — those file names (`0-start-exercise.yml`, `1-step.yml`, `2-step.yml`, `4-step.yml`) look like a **GitHub Skills tutorial repo**, not your real product repo. Those workflows are auto-managed by the Skills bot to progress through the exercise — nothing to do with your Android AAB build. Leave them alone. Ghost commits from deleted files stay in git history but never run again — Actions only reads the current commit.
-
-## Add my file as a fresh, independent workflow
-
-### Filename
-```
-.github/workflows/android-release.yml
-```
-
-### How to add it via GitHub web UI
-
-1. Go to your repo on github.com
-2. Click **Add file** → **Create new file**
-3. In the filename box at the top, type exactly: `.github/workflows/android-release.yml`
-   (GitHub auto-creates the `.github/workflows/` folders when you type slashes)
-4. Paste the YAML below into the code editor
-5. Scroll down → **Commit new file** directly to `main`
-
-### YAML to paste
 Action: view_file({"path":"/app/.github/workflows/android-release.yml"})
 Observation: [Showing lines 1-234 of 234 total] /app/.github/workflows/android-release.yml:
 1|# ══════════════════════════════════════════════════════════════════
