@@ -1,237 +1,132 @@
-Action: view_file({"path":"/app/.github/workflows/android-release.yml"})
-Observation: [Showing lines 1-234 of 234 total] /app/.github/workflows/android-release.yml:
-1|# ══════════════════════════════════════════════════════════════════
-2|# Ace Chasers — Signed Android AAB via GitHub Actions
-3|# ══════════════════════════════════════════════════════════════════
-4|# Cloud-only pipeline. Zero local build required.
-5|#
-6|# WHY THIS FILE EXISTS (v2 rewrite):
-7|#   • Android 16 / `compileSdk=36` requires **JDK 21**. AGP 8.6+ hard-
-8|#     fails on JDK 17 with an exit-code-1 that shows up mid-`bundleRelease`.
-9|#     Pinned to Zulu 21 to match `variables.gradle`.
-10|#   • Every action is on the newest major (checkout@v5, setup-java@v5,
-11|#     setup-node@v5) so the Node 20 → Node 24 deprecation warnings the
-12|#     runner was emitting go away.
-13|#   • Frontend build lives in `frontend/`, native project lives in
-14|#     `android/` — every step uses `working-directory` explicitly so
-15|#     Gradle always resolves paths from `android/` (never from repo
-16|#     root) and `keystore.properties` + `acechasers-upload.jks` land
-17|#     exactly where `rootProject.file("keystore.properties")` looks.
-18|#
-19|# REPO SECRETS REQUIRED (Settings → Secrets and variables → Actions):
-20|#   ANDROID_KEYSTORE_BASE64      — full keystore file, base64-encoded
-21|#   ANDROID_KEYSTORE_PASSWORD    — storePassword
-22|#   ANDROID_KEY_ALIAS            — alias name (e.g. acechasers-upload)
-23|#   ANDROID_KEY_PASSWORD         — keyPassword for the alias
-24|#
-25|# TRIGGERS:
-26|#   • Manual: Actions tab → "Android · Signed Release AAB" → Run workflow
-27|#   • Automatic: pushing a `v*.*.*` tag  (git tag v1.0.3 && git push --tags)
-28|# ══════════════════════════════════════════════════════════════════
-29|
-30|name: Android · Signed Release AAB
-31|
-32|on:
-33|  workflow_dispatch:
-34|    inputs:
-35|      version_note:
-36|        description: "Optional note shown in the artifact name"
-37|        required: false
-38|        default: ""
-39|  push:
-40|    tags:
-41|      - "v*.*.*"
-42|
-43|# Concurrency guard: only one release build per ref at a time — a
-44|# double-click on Run workflow doesn't stomp itself.
-45|concurrency:
-46|  group: android-release-${{ github.ref }}
-47|  cancel-in-progress: false
-48|
-49|jobs:
-50|  build-release-aab:
-51|    name: Build & sign AAB
-52|    runs-on: ubuntu-latest
-53|    timeout-minutes: 35
-54|
-55|    # Set once so every gradle step + sdkmanager step sees consistent
-56|    # env — beats sprinkling `env:` blocks under each individual step.
-57|    env:
-58|      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8"
-59|
-60|    steps:
-61|      # ── Source ─────────────────────────────────────────────────
-62|      - name: Checkout repository
-63|        uses: actions/checkout@v5
-64|        with:
-65|          # Full history isn't needed — shallow clone is faster.
-66|          fetch-depth: 1
-67|
-68|      # ── Toolchain: JDK 21 (Zulu) — required by AGP 8.6+ / SDK 36 ──
-69|      - name: Set up JDK 21 (Zulu)
-70|        uses: actions/setup-java@v5
-71|        with:
-72|          distribution: zulu
-73|          java-version: "21"
-74|
-75|      # ── Toolchain: Node 20 LTS ─────────────────────────────────
-76|      - name: Set up Node.js 20
-77|        uses: actions/setup-node@v5
-78|        with:
-79|          node-version: "20"
-80|          cache: yarn
-81|          cache-dependency-path: frontend/yarn.lock
-82|
-83|      # ── Frontend build (React 18 + Tailwind → Vite dist/) ─────
-84|      - name: Install frontend deps
-85|        working-directory: frontend
-86|        run: yarn install --frozen-lockfile
-87|
-88|      - name: Build web bundle
-89|        working-directory: frontend
-90|        run: yarn build
-91|
-92|      # ── Capacitor CLI + Android platform installs ─────────────
-93|      # These are dev deps of the mobile shell only, so install them
-94|      # here rather than committing them into package.json.
-95|      - name: Install Capacitor CLI + Android platform
-96|        working-directory: frontend
-97|        run: yarn add -D @capacitor/cli @capacitor/android
-98|
-99|      # ── Scaffold Android project if missing ────────────────────
-100|      # `cap add android` is idempotent — it detects existing files
-101|      # (our variables.gradle, app/build.gradle, AndroidManifest,
-102|      # google-services.json) and skips them. `gradlew` is the marker
-103|      # we check because it's the last thing `cap add` writes.
-104|      - name: Scaffold native Android project if needed
-105|        working-directory: frontend
-106|        run: |
-107|          if [ ! -f ../android/gradlew ]; then
-108|            echo "▶ Native project missing — running cap add android"
-109|            npx cap add android
-110|          else
-111|            echo "✓ Native project present — skipping cap add"
-112|          fi
-113|
-114|      - name: Sync web assets into native project
-115|        working-directory: frontend
-116|        run: npx cap sync android
-117|
-118|      # ── Android SDK — accept licenses + ensure API 36 installed ─
-119|      # ubuntu-latest runners ship with Android SDK pre-installed but
-120|      # not always with the newest platform. We accept licenses and
-121|      # explicitly request API 36 + Build-Tools 36.0.0 so gradle
-122|      # doesn't have to hit the sdkmanager network path during compile
-123|      # (which is what usually causes the silent exit-1 failure).
-124|      - name: Accept Android SDK licenses + install API 36
-125|        run: |
-126|          set -e
-127|          if [ -z "$ANDROID_HOME" ]; then
-128|            echo "::error::ANDROID_HOME not set on runner — Android SDK missing."
-129|            exit 1
-130|          fi
-131|          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-132|          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-133|            "platforms;android-36" \
-134|            "build-tools;36.0.0" \
-135|            "platform-tools"
-136|          echo "Installed platforms:"
-137|          ls "$ANDROID_HOME/platforms" || true
-138|
-139|      # ── Signing: restore keystore + write properties ──────────
-140|      # Both files land inside `android/` because that's the Gradle
-141|      # rootProject dir; `app/build.gradle` reads
-142|      #   rootProject.file("keystore.properties")
-143|      # which resolves to `android/keystore.properties`. The keystore
-144|      # path stored inside that file uses the runner's absolute path
-145|      # so gradle can find the .jks regardless of cwd.
-146|      - name: Restore keystore from secret
-147|        working-directory: android
-148|        env:
-149|          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-150|        run: |
-151|          set -e
-152|          if [ -z "$KEYSTORE_B64" ]; then
-153|            echo "::error::ANDROID_KEYSTORE_BASE64 secret is not set."
-154|            exit 1
-155|          fi
-156|          echo "$KEYSTORE_B64" | base64 -d > acechasers-upload.jks
-157|          echo "Keystore size: $(stat -c%s acechasers-upload.jks) bytes"
-158|
-159|      - name: Write keystore.properties
-160|        working-directory: android
-161|        env:
-162|          STORE_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-163|          KEY_PW: ${{ secrets.ANDROID_KEY_PASSWORD }}
-164|          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-165|        run: |
-166|          set -e
-167|          for var in STORE_PW KEY_PW KEY_ALIAS; do
-168|            if [ -z "${!var}" ]; then
-169|              echo "::error::Required secret $var is not set."
-170|              exit 1
-171|            fi
-172|          done
-173|          cat > keystore.properties <<EOF
-174|          storeFile=$(pwd)/acechasers-upload.jks
-175|          storePassword=${STORE_PW}
-176|          keyAlias=${KEY_ALIAS}
-177|          keyPassword=${KEY_PW}
-178|          EOF
-179|          echo "✓ keystore.properties written ($(wc -l < keystore.properties) lines)"
-180|
-181|      # ── Compile the signed AAB ─────────────────────────────────
-182|      # `working-directory: android` guarantees `./gradlew` resolves
-183|      # correctly against the native project root. `--stacktrace` +
-184|      # `--info` make any AGP/Gradle failure land a full trace in the
-185|      # log instead of the bare `exit 1` you were seeing.
-186|      - name: Build signed release AAB
-187|        working-directory: android
-188|        run: |
-189|          set -e
-190|          chmod +x gradlew
-191|          echo "▶ Java version:" && java -version
-192|          echo "▶ Gradle version:" && ./gradlew --version | head -20
-193|          ./gradlew clean bundleRelease \
-194|            --stacktrace --info \
-195|            --no-daemon \
-196|            --max-workers=2
-197|
-198|      # ── Verify signature — hard-fail if unsigned ──────────────
-199|      # Belt-and-braces so a mis-configured signing block can never
-200|      # ship an unsigned AAB to Play Console.
-201|      - name: Verify AAB signature
-202|        working-directory: android
-203|        run: |
-204|          set -e
-205|          AAB=app/build/outputs/bundle/release/app-release.aab
-206|          if [ ! -f "$AAB" ]; then
-207|            echo "::error::AAB not produced at $AAB"
-208|            exit 1
-209|          fi
-210|          jarsigner -verify "$AAB" | tee /tmp/jarverify.log
-211|          grep -q "jar verified" /tmp/jarverify.log || {
-212|            echo "::error::AAB signature verification failed"; exit 1;
-213|          }
-214|          echo "✓ Signed AAB size: $(du -h "$AAB" | cut -f1)"
-215|
-216|      # ── Shred secret files from the runner disk ───────────────
-217|      # Runners are ephemeral (fresh VM per job) so this is belt &
-218|      # braces — makes the intent explicit for auditors.
-219|      - name: Shred keystore + properties from runner
-220|        if: always()
-221|        working-directory: android
-222|        run: |
-223|          shred -u -z acechasers-upload.jks keystore.properties 2>/dev/null || \
-224|            rm -f acechasers-upload.jks keystore.properties
-225|
-226|      # ── Publish the signed AAB as a workflow artifact ─────────
-227|      - name: Upload signed AAB
-228|        uses: actions/upload-artifact@v4
-229|        with:
-230|          name: acechasers-app-release-${{ github.run_number }}${{ inputs.version_note && format('-{0}', inputs.version_note) || '' }}
-231|          path: android/app/build/outputs/bundle/release/app-release.aab
-232|          if-no-files-found: error
-233|          retention-days: 30
-234|
-[End of file]
+yaml
+name: Android · Signed Release AAB
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_note:
+        description: "Optional note shown in the artifact name"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release-aab:
+    name: Build & sign AAB
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Set up JDK 21 (Zulu)
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: "21"
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: yarn install --frozen-lockfile
+
+      - name: Build web bundle
+        working-directory: frontend
+        run: yarn build
+
+      - name: Install Capacitor CLI + Android platform
+        working-directory: frontend
+        run: yarn add -D @capacitor/cli @capacitor/android
+
+      - name: Scaffold native Android project if needed
+        working-directory: frontend
+        run: |
+          if [ ! -f ../android/gradlew ]; then
+            npx cap add android
+          else
+            echo "Native project present"
+          fi
+
+      - name: Sync web assets into native project
+        working-directory: frontend
+        run: npx cap sync android
+
+      - name: Accept Android SDK licenses + install API 36
+        run: |
+          set -e
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools"
+
+      - name: Restore keystore from secret
+        working-directory: android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -e
+          echo "$KEYSTORE_B64" | base64 -d > acechasers-upload.jks
+
+      - name: Write keystore.properties
+        working-directory: android
+        env:
+          STORE_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PW: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          cat > keystore.properties <<EOF
+          storeFile=$(pwd)/acechasers-upload.jks
+          storePassword=${STORE_PW}
+          keyAlias=${KEY_ALIAS}
+          keyPassword=${KEY_PW}
+          EOF
+
+      - name: Build signed release AAB
+        working-directory: android
+        run: |
+          set -e
+          chmod +x gradlew
+          java -version
+          ./gradlew clean bundleRelease --stacktrace --info --no-daemon --max-workers=2
+
+      - name: Verify AAB signature
+        working-directory: android
+        run: |
+          set -e
+          AAB=app/build/outputs/bundle/release/app-release.aab
+          jarsigner -verify "$AAB" | tee /tmp/jarverify.log
+          grep -q "jar verified" /tmp/jarverify.log
+
+      - name: Shred keystore + properties from runner
+        if: always()
+        working-directory: android
+        run: |
+          shred -u -z acechasers-upload.jks keystore.properties 2>/dev/null || \
+            rm -f acechasers-upload.jks keystore.properties
+
+      - name: Upload signed AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: acechasers-app-release-${{ github.run_number }}
+          path: android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 30
